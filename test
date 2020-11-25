@@ -1,0 +1,454 @@
+//===================================================================================================
+// DXID_000200API.cpp	文件注释
+// 文件名	：	DXID_000200API.cpp
+// 文件路径	：	D:\_Work_Projects\HUAWEI_CFC\AutomaticFeatureIdentify\ObjectDll\DXID_000200\src\DXID_000200API.cpp
+// 作者		：	SuiCongrui
+// 创建时间	：	2020-08-24 18:41
+// 文件描述	：	DXID_000200 对象识别库 EMN外部器件上平面集
+//===================================================================================================
+
+#include "stdafx.h"
+#include "BPCalc.h"
+#include "DXID_000200API.h"
+#include <unordered_map>
+
+//===================================================================================================
+
+// COMMON NAME ID
+#define SHIELDCOVER_COMMONNAME	"SHIELDCOVER"	//屏蔽罩
+#define MAINPCBEMN_COMMONNAME	"MAINPCBEMN"	//主板EMN
+#define SUBPCBEMN_COMMONNAME	"SUBPCBEMN"		//小板EMN
+#define MAINPCB_COMMONNAME		"MAINPCB"		//主板
+#define SUBPCB_COMMONNAME		"SUBPCB"		//副板
+// FEATURE NAME
+#define FEATURE_NAME			"DXID_000200"
+
+//===================================================================================================
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#endif // _DEBUG
+
+//===================================================================================================
+BPFLOAT3 X(1, 0, 0);
+BPFLOAT3 Y(0, 1, 0);
+BPFLOAT3 Z(0, 0, 1);
+class EMNSrfNode
+{
+public:
+	const BPAPITreeNode * owner;
+	vector<BPSurface> srfs;
+	vector<int> srfIds;
+};
+
+BPFLOAT3 getCenterPoint(BOUNDBOX &box)
+{
+	return{ (box._max.x + box._min.x) / 2, (box._max.y + box._min.y) / 2, (box._max.z + box._min.z) / 2 };
+}
+
+IKS_BOOL IsBoxInMel(const BPAPITreeNode * &pTreeNode, BOUNDBOX &calcBox)
+{
+	BOUNDBOX worldBox;
+	BPGetModelWorldOutLine(pTreeNode, worldBox);
+	if (calcBox._max.x < worldBox._max.x &&
+		calcBox._min.x > worldBox._min.x &&
+		calcBox._max.y < worldBox._max.y &&
+		calcBox._min.y > worldBox._min.y &&
+		calcBox._max.z < worldBox._max.z &&
+		calcBox._min.z > worldBox._min.z)
+		return true;
+	return false;
+}
+
+
+const BPAPITreeNode * IsBoxInMdl(vector<const BPAPITreeNode *> &pTreeNode, BOUNDBOX &calcBox)
+{
+	for (const BPAPITreeNode * node : pTreeNode)
+	{
+		if (IsBoxInMel(node, calcBox))
+			return node;
+	}
+	return NULL;
+}
+
+vector<int> getSrfAllCurves(const BPAPITreeNode *&node, vector<BPSurface> &srf)
+{
+	vector<int> res;
+	for (BPSurface s : srf)
+	{
+		vector<BPContour> cons;
+		BPGetModelContours(&s, cons);
+		for (BPContour con : cons)
+		{
+			if (con.nType != BPCONTOURTYPE_OUTER)
+				continue;
+			vector<BPCurve> curs;
+			BPGetContourEdges(node, con, curs);
+			for (BPCurve cur : curs)
+				res.push_back(cur.nID);
+		}
+	}
+	return res;
+}
+
+int nGroupID = 1;
+IKS_BOOL findInsideLines(const BPAPITreeNode *&PCBNode, vector<const BPAPITreeNode *> &arrShieldCoverNodes, vector<const BPAPITreeNode *> &arrEMNNodes)
+{
+	if (PCBNode == NULL)
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "PCB node is NULL");
+		return false;
+	}
+	if (arrShieldCoverNodes.empty())
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Shield cover nodes is empty");
+		return false;
+	}
+	if (arrEMNNodes.empty())
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "EMN nodes is empty");
+		return false;
+	}
+
+	BOUNDBOX pcbBox;
+	BPFLOAT3 pcbCtrPoint;
+	BPCalc calcHandle;
+	BPGetModelWorldOutLine(PCBNode, pcbBox);
+	pcbCtrPoint = getCenterPoint(pcbBox);
+
+	// 屏蔽罩正背面识别
+	vector<const BPAPITreeNode *> ZAxisShieldCoverNodes;
+	vector<const BPAPITreeNode *> _ZAxisShieldCoverNodes;
+	for (const BPAPITreeNode * shieldNode : arrShieldCoverNodes)
+	{
+		BOUNDBOX shieldBox;
+		BPFLOAT3 shieldCtrPoint;
+		BPGetModelWorldOutLine(shieldNode, shieldBox);
+		shieldCtrPoint = getCenterPoint(shieldBox);
+		if (shieldCtrPoint.x < pcbBox._max.x &&
+			shieldCtrPoint.x > pcbBox._min.x &&
+			shieldCtrPoint.y < pcbBox._max.y &&
+			shieldCtrPoint.y > pcbBox._min.y)
+		{
+			if (shieldCtrPoint.z > pcbCtrPoint.z)
+				ZAxisShieldCoverNodes.push_back(shieldNode);
+			else
+				_ZAxisShieldCoverNodes.push_back(shieldNode);
+		}
+	}
+
+	// EMN正背面识别
+	vector<EMNSrfNode> ZAxisEMNSrfNodes;
+	vector<EMNSrfNode> _ZAxisEMNSrfNodes;
+	for (const BPAPITreeNode * emnNode : arrEMNNodes)
+	{
+		vector<BPSurface> emnSrfs;
+		EMNSrfNode ZAxisNode;
+		EMNSrfNode _ZAxisNode;
+		BPMATRIX emnMatrix;
+		BPGetModelWordldTrfGet(emnNode, emnMatrix);
+		BPGetModelSrfs(emnNode, emnSrfs);
+		for (BPSurface emnSrf : emnSrfs)
+		{
+			if (emnSrf.nType != BPSURFTYPE_PLANE || !IKS_MATH::IsVecSameDir(emnSrf.Surfacedata.plane.vAxisZ, Z) &&
+				!IKS_MATH::IsVecReverseDir(emnSrf.Surfacedata.plane.vAxisZ, Z))
+				continue;
+
+			BOUNDBOX srfLocalBox, srfWorldBox;
+			BPGetSrfOutLine(emnNode, &emnSrf, srfLocalBox);
+			BPBoxTransformToWorld(srfLocalBox, srfWorldBox, emnMatrix);
+
+			BPFLOAT3 srfCtrPoint = getCenterPoint(srfWorldBox);
+			BPFLOAT3 vecPCBZToSrfZ = { 0,0, srfCtrPoint.z - pcbCtrPoint.z };
+			if (!IKS_MATH::IsVecSameDir(vecPCBZToSrfZ, emnSrf.Surfacedata.plane.vAxisZ))
+				continue;
+			if (IKS_MATH::IsVecSameDir(vecPCBZToSrfZ, Z))
+			{
+				const BPAPITreeNode *shieldNode = IsBoxInMdl(ZAxisShieldCoverNodes, srfWorldBox);
+				if (shieldNode != NULL)
+					continue;
+				//BOUNDBOX shieldBox;
+				//BPFLOAT3 shieldCtrPoint;
+				//BPGetModelWorldOutLine(shieldNode, shieldBox);
+				//shieldCtrPoint = getCenterPoint(shieldBox);
+				ZAxisNode.srfs.push_back(emnSrf);
+			}
+			else
+			{
+				const BPAPITreeNode *shieldNode = IsBoxInMdl(_ZAxisShieldCoverNodes, srfWorldBox);
+				if (shieldNode != NULL)
+					continue;
+				_ZAxisNode.srfs.push_back(emnSrf);
+			}
+		}
+		if (!ZAxisNode.srfs.empty())
+		{
+			ZAxisNode.owner = emnNode;
+			ZAxisEMNSrfNodes.push_back(ZAxisNode);
+		}
+		if (!_ZAxisNode.srfs.empty())
+		{
+			_ZAxisNode.owner = emnNode;
+			_ZAxisEMNSrfNodes.push_back(_ZAxisNode);
+		}
+	}
+	// 模型面对应下标的哈希表
+	unordered_map<const BPAPITreeNode*, unordered_map<int, int>> uMap;
+	for (const BPAPITreeNode * emnNode : arrEMNNodes)
+	{
+		vector<BPSurface> arrSrfs;
+		BPGetModelSrfs(emnNode, arrSrfs);
+		for (int i = 0; i < arrSrfs.size(); ++i)
+		{
+			uMap[emnNode][arrSrfs[i].nID] = i;
+		}
+	}
+
+	unordered_map<const BPAPITreeNode*, vector<int>> uMapIds;
+	for (EMNSrfNode emnSrfNode : ZAxisEMNSrfNodes)
+	{
+		for (BPSurface srf : emnSrfNode.srfs)
+		{
+			if (uMap[emnSrfNode.owner].find(srf.nID) != uMap[emnSrfNode.owner].end())
+				uMapIds[emnSrfNode.owner].push_back(uMap[emnSrfNode.owner][srf.nID]);
+		}
+	}
+
+	for (EMNSrfNode emnSrfNode : _ZAxisEMNSrfNodes)
+	{
+		for (BPSurface srf : emnSrfNode.srfs)
+		{
+			if (uMap[emnSrfNode.owner].find(srf.nID) != uMap[emnSrfNode.owner].end())
+				uMapIds[emnSrfNode.owner].push_back(uMap[emnSrfNode.owner][srf.nID]);
+		}
+	}
+
+	for (auto it : uMapIds)
+	{
+		if (it.first == NULL)
+			continue;
+
+		unsigned int nTreeID = 0;
+		if (!BPGetTreeNodeID(it.first, nTreeID))
+			continue;
+
+		BPCraftSubData data;
+		data.craftGroupID = nGroupID++;
+		data.nSelfTreeNodeID = nTreeID;
+		data.arrSurfaceIndex.swap(it.second);
+		if (!BPAddCarftFeature(it.first, CRATF_SURFACE, _T(FEATURE_NAME), data))
+		{
+			LOG_LEVEL(LOG_LEVEL_ERROR, "Add shield cover craft feature error");
+			continue;
+		}
+	}
+
+	return true;
+}
+
+//===================================================================================================
+// GetObjectInfo	函数注释
+// 作者		：	Zyl
+// 创建时间	：	2020/11/24 21:42
+// 参数		：	dxInfo,						对象信息（OUT）
+// 文件描述	：	获取对象信息
+//===================================================================================================
+bool GetObjectInfo(DXInfo & dxInfo)
+{
+	dxInfo.strDXID = FEATURE_NAME;
+	dxInfo.strDXDesc = L"EMN外部器件上平面集";
+	dxInfo.DxType = CRATF_SURFACE;
+	return true;
+}
+//===================================================================================================
+// IdentifyObject	函数注释
+// 作者		：	SuiCongrui
+// 创建时间	：	2020/09/09 20:19
+// 参数		：	handle					场景句柄传入BPAPI_GetSceneHandle （IN）
+//				rootNode,				树根节点（IN）
+//				arrCommonNameData		COMMON NAME 数据（IN）
+//				arrObjectData			COMMON ID 数据（IN）
+// 文件描述	：	识别对象，识别成功自动存节点中
+//===================================================================================================
+CON_API bool IdentifyObject(void * handle, const BPAPITreeNode *rootNode, const arrCommonNameData &arrCommonNameData,
+	const arrObjectCommonDatas &arrObjectData)
+{
+	// 日志初始化
+	CString strLogPath = _T("");
+	GetMainModuleFullPath(strLogPath);
+	strLogPath += _T(IDENTIFY_LOG_FILENAME);
+	char szPath[_MAX_PATH];
+	int nDestLen = _MAX_PATH;
+	CStringToConvertChar(strLogPath, (char *)szPath, nDestLen);
+	CLog::SetLogFilePath(szPath);
+
+	LOG_BEGIN(FEATURE_NAME);
+
+	// 检查形参
+	if (handle == NULL)
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Handle is NULL");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	if (rootNode == NULL)
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Root node is NULL");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+
+	// 初始化场景句柄
+	if (!BPAPI_SetSceneHandle(handle))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "BPAPI_SetSceneHandle error");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	// 屏蔽罩
+	vector<const BPAPITreeNode *> arrShieldcoverNodes;
+	if (!GetSubNodeByCommonID(rootNode, _T(FEATURE_NAME), _T(SHIELDCOVER_COMMONNAME), arrCommonNameData,
+		arrObjectData, arrShieldcoverNodes, true))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Get shield cover tree node error");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	if (arrShieldcoverNodes.empty())
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Shield cover tree node not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	// 主板EMN
+	vector<const BPAPITreeNode *> arrMainPCBEMNNodes;
+	if (!GetSubNodeByCommonID(rootNode, _T(FEATURE_NAME), _T(MAINPCBEMN_COMMONNAME), arrCommonNameData,
+		arrObjectData, arrMainPCBEMNNodes, true))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Get main-pcb-emn tree node error");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	if (arrMainPCBEMNNodes.empty())
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Main-pcb-emn tree node not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+
+	// 小板EMN
+	vector<const BPAPITreeNode *> arrSubPCBEMNNodes;
+	if (!GetSubNodeByCommonID(rootNode, _T(FEATURE_NAME), _T(SUBPCBEMN_COMMONNAME), arrCommonNameData,
+		arrObjectData, arrSubPCBEMNNodes, true))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Get sub-pcb-emn tree node error");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	if (arrSubPCBEMNNodes.empty())
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Sub-pcb-emn cover tree node not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+
+	// 主板
+	vector<const BPAPITreeNode *> arrMainPCBNodes;
+	if (!GetSubNodeByCommonID(rootNode, _T(FEATURE_NAME), _T(MAINPCB_COMMONNAME), arrCommonNameData,
+		arrObjectData, arrMainPCBNodes, true))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Get main-pcb cover tree node error");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	if (arrMainPCBNodes.empty())
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Main-pcb cover tree node not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+
+	// 小板
+	vector<const BPAPITreeNode *> arrSubPCBNodes;
+	if (!GetSubNodeByCommonID(rootNode, _T(FEATURE_NAME), _T(SUBPCB_COMMONNAME), arrCommonNameData,
+		arrObjectData, arrSubPCBNodes, true))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Get sub-pcb cover tree node error");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	if (arrSubPCBNodes.empty())
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Sub-pcb cover tree node not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+
+	// 识别主板PCB
+	const BPAPITreeNode * mainPCB = NULL;
+	float maxArea = FLT_MIN;
+	for (const BPAPITreeNode *pcbNode : arrMainPCBNodes)
+	{
+		BOUNDBOX box;
+		float area;
+		BPGetModelOutLine(pcbNode, box);
+		area = abs(box._max.x - box._min.x) * abs(box._max.y - box._min.y);
+		if (area > maxArea)
+		{
+			maxArea = area;
+			mainPCB = pcbNode;
+		}
+	}
+	if (mainPCB == NULL)
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Main PCB node not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	LOG2("Main PCB", CS2S(BPGetModelName(mainPCB)));
+
+	// 识别主板PCB
+	maxArea = FLT_MIN;
+	const BPAPITreeNode * subPCB = NULL;
+	for (const BPAPITreeNode *pcbNode : arrSubPCBNodes)
+	{
+		BOUNDBOX box;
+		float area;
+		BPGetModelOutLine(pcbNode, box);
+		area = abs(box._max.x - box._min.x) * abs(box._max.y - box._min.y);
+		if (area > maxArea)
+		{
+			maxArea = area;
+			subPCB = pcbNode;
+		}
+	}
+	if (subPCB == NULL)
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Sub PCB node not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	LOG2("Sub PCB", CS2S(BPGetModelName(subPCB)));
+
+	// 打印主PCB-EMN
+	for (const BPAPITreeNode *emnNode : arrMainPCBEMNNodes)
+		LOG2("Main EMN", CS2S(BPGetModelName(emnNode)));
+	// 打印副PCB-EMN
+	for (const BPAPITreeNode *emnNode : arrSubPCBEMNNodes)
+		LOG2("Sub EMN", CS2S(BPGetModelName(emnNode)));
+
+	if (!findInsideLines(mainPCB, arrShieldcoverNodes, arrMainPCBEMNNodes))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Main-PCB-EMN lines not find");
+		LOG_END(FEATURE_NAME);
+		return false;
+	}
+	if (!findInsideLines(subPCB, arrShieldcoverNodes, arrSubPCBEMNNodes))
+	{
+		LOG_LEVEL(LOG_LEVEL_ERROR, "Sub-PCB-EMN lines not find");
+	}
+	LOG_END(FEATURE_NAME);
+	return true;
+}
+
+//===================================================================================================
